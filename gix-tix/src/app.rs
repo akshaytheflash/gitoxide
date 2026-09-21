@@ -3850,7 +3850,12 @@ impl App {
     pub(crate) fn update_monitor_error(&mut self, outcome: &gix::notify::Outcome) -> bool {
         let error = if let Some(error) = outcome.errors.last() {
             Some(format!("filesystem watch: {error}"))
-        } else if outcome.recovery_pending {
+        } else if outcome.recovery_pending
+            || !matches!(
+                outcome.coverage,
+                gix::notify::CoverageStatus::Healthy | gix::notify::CoverageStatus::Inactive
+            )
+        {
             return false;
         } else {
             None
@@ -4487,7 +4492,22 @@ mod tests {
                 Some(expected.as_str()),
                 "a successful status load and navigation cannot repair native coverage"
             );
-            assert!(app.update_monitor_error(&gix::notify::Outcome::default()));
+            assert!(
+                !app.update_monitor_error(&gix::notify::Outcome {
+                    coverage: gix::notify::CoverageStatus::Updating,
+                    ..Default::default()
+                }),
+                "successful repair still needs coverage verification before clearing the warning"
+            );
+            assert_eq!(
+                app.changes_error(ChangePane::Worktree),
+                Some(expected.as_str()),
+                "verification preserves the diagnostic after retry backoff ends"
+            );
+            assert!(app.update_monitor_error(&gix::notify::Outcome {
+                coverage: gix::notify::CoverageStatus::Healthy,
+                ..Default::default()
+            }));
             assert!(
                 app.changes_error(ChangePane::Worktree).is_none(),
                 "successful registration clears the warning and schedules a redraw"
