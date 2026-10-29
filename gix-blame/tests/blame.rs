@@ -278,6 +278,7 @@ macro_rules! mktest {
                     rewrites: Some(gix_diff::Rewrites::default()),
                     debug_track_path: false,
                     boundary_commits: Vec::new(),
+                    ignored_revisions: Vec::new(),
                     contents_mode: None,
                 },
             )?
@@ -369,6 +370,7 @@ fn diff_algorithm_parity() {
                 rewrites: Some(gix_diff::Rewrites::default()),
                 debug_track_path: false,
                 boundary_commits: Vec::new(),
+                ignored_revisions: Vec::new(),
                 contents_mode: None,
             },
         )
@@ -438,6 +440,7 @@ fn since() -> gix_testtools::TestResult {
             rewrites: Some(gix_diff::Rewrites::default()),
             debug_track_path: false,
             boundary_commits: Vec::new(),
+            ignored_revisions: Vec::new(),
             contents_mode: None,
         },
     )?
@@ -480,6 +483,7 @@ mod blame_ranges {
                 rewrites: Some(gix_diff::Rewrites::default()),
                 debug_track_path: false,
                 boundary_commits: Vec::new(),
+                ignored_revisions: Vec::new(),
                 contents_mode: None,
             },
         )?
@@ -525,6 +529,7 @@ mod blame_ranges {
                 rewrites: None,
                 debug_track_path: false,
                 boundary_commits: Vec::new(),
+                ignored_revisions: Vec::new(),
                 contents_mode: None,
             },
         )?
@@ -568,6 +573,7 @@ mod blame_ranges {
                 rewrites: None,
                 debug_track_path: false,
                 boundary_commits: Vec::new(),
+                ignored_revisions: Vec::new(),
                 contents_mode: None,
             },
         )?
@@ -616,6 +622,7 @@ mod rename_tracking {
                 rewrites: Some(gix_diff::Rewrites::default()),
                 debug_track_path: false,
                 boundary_commits: Vec::new(),
+                ignored_revisions: Vec::new(),
                 contents_mode: None,
             },
         )?
@@ -648,6 +655,7 @@ mod rename_tracking {
                     rewrites: Some(gix_diff::Rewrites::default()),
                     debug_track_path: false,
                     boundary_commits: Vec::new(),
+                    ignored_revisions: Vec::new(),
                     contents_mode: None,
                 },
             )?
@@ -688,6 +696,7 @@ mod untracked_changes {
                     rewrites: Some(gix_diff::Rewrites::default()),
                     debug_track_path: false,
                     boundary_commits: Vec::new(),
+                    ignored_revisions: Vec::new(),
                     contents_mode: None,
                 },
             )?
@@ -722,6 +731,7 @@ mod untracked_changes {
                     rewrites: Some(gix_diff::Rewrites::default()),
                     debug_track_path: false,
                     boundary_commits: Vec::new(),
+                    ignored_revisions: Vec::new(),
                     contents_mode: None,
                 },
             )?
@@ -756,6 +766,7 @@ mod untracked_changes {
                     rewrites: Some(gix_diff::Rewrites::default()),
                     debug_track_path: false,
                     boundary_commits: Vec::new(),
+                    ignored_revisions: Vec::new(),
                     contents_mode: None,
                 },
             )?
@@ -951,6 +962,7 @@ mod symlinks {
                     rewrites: Some(gix_diff::Rewrites::default()),
                     debug_track_path: false,
                     boundary_commits: Vec::new(),
+                    ignored_revisions: Vec::new(),
                     contents_mode: None,
                 },
             )?
