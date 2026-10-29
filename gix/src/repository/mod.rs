@@ -137,6 +137,8 @@ pub mod pack;
 #[cfg(feature = "attributes")]
 mod pathspec;
 mod reference;
+/// Reflog expiration across worktrees.
+pub mod reflog;
 mod remote;
 mod revision;
 mod shallow;
