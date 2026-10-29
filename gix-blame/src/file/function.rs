@@ -5,7 +5,7 @@ use std::{
 };
 
 use gix_diff::{blob::TokenSource, tree::Visit};
-use gix_error::{ErrorExt, OptionExt, ResultExt, bail, message};
+use gix_error::{ErrorExt, OptionExt, ResultExt, message};
 use gix_hash::ObjectId;
 use gix_object::{
     FindExt,
@@ -944,7 +944,13 @@ fn diffable_blob(
     file_path: &BStr,
 ) -> Result<Vec<u8>> {
     if mode != gix_object::tree::EntryKind::Link {
-        resource_cache.set_resource(Some(blob_id), mode, file_path, gix_diff::blob::ResourceKind::OldOrSource, odb)?;
+        resource_cache.set_resource(
+            Some(blob_id),
+            mode,
+            file_path,
+            gix_diff::blob::ResourceKind::OldOrSource,
+            odb,
+        )?;
         if let Some(data) = resource_cache
             .resource(gix_diff::blob::ResourceKind::OldOrSource)
             .and_then(|resource| resource.data.as_slice())
