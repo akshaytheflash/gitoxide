@@ -12,16 +12,10 @@ use super::git::{self, ConfigPaths};
 
 mod auxiliary;
 mod msys;
-mod registry;
+pub(in crate::env) mod registry;
 mod scoop;
 
 pub(super) const EXE_NAME: &str = "git.exe";
-
-// There are a number of ways to refer to the null device on Windows, but they are not all equally
-// well supported. Git for Windows rejects `\\.\NUL` and `\\.\nul`. On Windows 11 ARM64 (and maybe
-// some others), it rejects even the legacy name `NUL`, when capitalized. But it always accepts the
-// lower-case `nul`, handling it in various path checks, some of which are done case-sensitively.
-pub(super) const NULL_DEVICE: &str = "nul";
 
 /// Try fixed paths before registry queries and directory scans, preferring common installers
 /// within each cost tier. Each source is only probed after earlier candidates are exhausted.
@@ -51,9 +45,9 @@ pub(super) fn alternative_executable() -> Option<&'static Path> {
     EXECUTABLE.as_deref()
 }
 
-fn locations_under_program_files<F>(var_os_func: F) -> Vec<PathBuf>
+pub(in crate::env) fn locations_under_program_files<F>(mut var_os_func: F) -> Vec<PathBuf>
 where
-    F: Fn(&str) -> Option<std::ffi::OsString>,
+    F: FnMut(&str) -> Option<std::ffi::OsString>,
 {
     // Should give a 64-bit program files path from a 32-bit or 64-bit process on a 64-bit system.
     let varname_64bit = "ProgramW6432";
@@ -129,7 +123,9 @@ where
     locations
 }
 
-fn locations_under_scoop(var_os: impl Fn(&str) -> Option<std::ffi::OsString>) -> impl Iterator<Item = PathBuf> {
+pub(in crate::env) fn locations_under_scoop(
+    var_os: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> impl Iterator<Item = PathBuf> {
     scoop_roots(var_os).map(|root| root.join("apps/git/current/cmd"))
 }
 
@@ -145,8 +141,8 @@ fn locations_under_scoop_without_junctions(
     })
 }
 
-fn scoop_roots(var_os: impl Fn(&str) -> Option<std::ffi::OsString>) -> impl Iterator<Item = PathBuf> {
-    let absolute = move |name| var_os(name).map(PathBuf::from).filter(|path| path.is_absolute());
+fn scoop_roots(mut var_os: impl FnMut(&str) -> Option<std::ffi::OsString>) -> impl Iterator<Item = PathBuf> {
+    let mut absolute = move |name| var_os(name).map(PathBuf::from).filter(|path| path.is_absolute());
     [("SCOOP", "USERPROFILE"), ("SCOOP_GLOBAL", "ProgramData")]
         .into_iter()
         .filter_map(move |(variable, default_base)| {
@@ -178,13 +174,13 @@ fn scoop_version_without_junction(app: &Path) -> Option<PathBuf> {
         .map(|(_, directory)| directory.join("cmd"))
 }
 
-fn locations_under_package_managers(
-    var_os: impl Fn(&str) -> Option<std::ffi::OsString> + Copy,
+pub(in crate::env) fn locations_under_package_managers(
+    mut var_os: impl FnMut(&str) -> Option<std::ffi::OsString>,
 ) -> impl Iterator<Item = PathBuf> {
     // Honor a known Git root, including the one Scoop exports, before guessing package roots.
     // These are all fixed paths, ordered by expected prevalence within the cheap tier.
-    locations_from_env(
-        var_os,
+    let mut locations: Vec<_> = locations_from_env(
+        &mut var_os,
         [
             ("GIT_INSTALL_ROOT", "cmd"),
             ("LocalAppData", "Microsoft/WinGet/Links"),
@@ -193,16 +189,18 @@ fn locations_under_package_managers(
             ("ChocolateyToolsLocation", "git/cmd"),
         ],
     )
-    .chain(locations_under_scoop(var_os))
-    .chain(locations_from_env(
-        var_os,
+    .collect();
+    locations.extend(locations_under_scoop(&mut var_os));
+    locations.extend(locations_from_env(
+        &mut var_os,
         // Only an active Conda/Mamba environment participates; do not pick inactive environments.
         [("CONDA_PREFIX", "Library/bin"), ("GIT_INSTALL_ROOT", "usr/bin")],
-    ))
+    ));
+    locations.into_iter()
 }
 
 fn locations_from_env(
-    var_os: impl Fn(&str) -> Option<std::ffi::OsString>,
+    mut var_os: impl FnMut(&str) -> Option<std::ffi::OsString>,
     roots: impl IntoIterator<Item = (&'static str, &'static str)>,
 ) -> impl Iterator<Item = PathBuf> {
     roots.into_iter().filter_map(move |(variable, suffix)| {
@@ -302,10 +300,12 @@ fn msys_bin_at(executable: &Path) -> Option<&Path> {
 }
 
 /// Convert paths emitted by MSYS Git to paths usable by native Windows callers.
+#[cfg(test)]
 pub(super) fn native_path(path: &Path) -> Option<PathBuf> {
     native_path_with(path, msys_bin)
 }
 
+#[cfg(test)]
 fn native_path_with<'a>(path: &Path, msys_bin: impl FnOnce() -> Option<&'a Path>) -> Option<PathBuf> {
     if path.is_absolute() || !path.as_os_str().as_encoded_bytes().starts_with(b"/") {
         return Some(path.to_owned());
@@ -355,9 +355,9 @@ where
         .map(Path::to_path_buf)
 }
 
-fn system_prefix_from_exepath_var<F>(var_os_func: F) -> Option<PathBuf>
+pub(in crate::env) fn system_prefix_from_exepath_var<F>(mut var_os_func: F) -> Option<PathBuf>
 where
-    F: Fn(&str) -> Option<OsString>,
+    F: FnMut(&str) -> Option<OsString>,
 {
     // Only attempt this optimization if the `EXEPATH` variable is set to an absolute path.
     let root = var_os_func("EXEPATH").map(PathBuf::from).filter(|r| r.is_absolute())?;
@@ -506,23 +506,6 @@ pub(super) fn shell() -> super::Shell {
 
 pub(super) fn associated_program(name: &str) -> Option<PathBuf> {
     auxiliary::find_git_associated_windows_executable(name).map(|executable| executable.program.into())
-}
-
-pub(super) fn command(executable: impl AsRef<OsStr>) -> Command {
-    use std::os::windows::process::CommandExt;
-    let mut cmd = Command::new(executable);
-    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    cmd
-}
-
-pub(super) fn config_query_cwd() -> PathBuf {
-    // We try the Windows directory (usually `C:\Windows`) first. It is given by `SystemRoot`,
-    // except in rare cases where our own parent has not passed down that environment variable.
-    env::var_os("SystemRoot")
-        .or_else(|| env::var_os("windir"))
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .unwrap_or_else(env::temp_dir)
 }
 
 #[cfg(test)]
