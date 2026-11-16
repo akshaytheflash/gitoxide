@@ -2348,9 +2348,22 @@ views.
 - Monitored status uses at most three tracked-file workers on macOS, matching
   `gix status` to avoid excessive CPU spent in concurrent metadata checks.
   Other platforms retain their available parallelism.
+- Staged status reuses one detached index expanded from the captured `HEAD` tree
+  while its tree ID and effective path-protection settings remain unchanged.
+  Full, configuration, layout, and status-target invalidations discard it.
+  Failed or cancelled refreshes never publish a replacement. The cache retains
+  no repository, object database, or open worktree index.
 - Status deltas replace only changed display rows. Snapshot coverage also invalidates
-  line counts when the status classification stays unchanged. Unaffected rows retain
-  their cached counts, including when only index metadata changes. A full refresh
+  worktree line counts when the status classification stays unchanged. Staged rows
+  reuse counts when their blob IDs, modes, paths, indexed attributes, resolved
+  configuration (including source/trust), and external attribute contents are
+  unchanged. This detached key retains the configuration, attribute source paths
+  and contents, and indexed attribute mappings without retaining a repository.
+  Configuration, attribute, layout, and explicit full refreshes invalidate reuse;
+  external inputs are compared on every refresh even without their own notification.
+  Configuration changes and attribute notifications release line-diff workers so
+  the next batch opens current configuration. Unaffected rows retain their cached
+  counts, including when only index metadata changes. A full refresh
   rebuilds display rows from the snapshot, even if its delta is empty after a
   previous display failure. When a directory replaces a tracked file, the deleted
   file and untracked directory remain separate rows; deletion line counts do not

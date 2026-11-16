@@ -331,6 +331,15 @@ struct LineDiffPool {
     parallelism: usize,
     active: Option<LineDiffWorkers>,
     last_used: Option<Instant>,
+    staged_diff_key: Option<StagedDiffKey>,
+}
+
+#[derive(PartialEq)]
+struct StagedDiffKey {
+    configuration: BString,
+    configuration_metadata: Vec<gix::config::file::Metadata>,
+    global_attributes: Vec<(PathBuf, Option<Vec<u8>>)>,
+    indexed_attributes: Vec<(BString, gix::ObjectId)>,
 }
 
 struct LineDiffWorkers {
@@ -425,6 +434,7 @@ impl LineDiffPool {
             parallelism: parallelism.max(1),
             active: None,
             last_used: None,
+            staged_diff_key: None,
         }
     }
 
@@ -443,6 +453,12 @@ impl LineDiffPool {
             .line_counts(changes);
         self.last_used = Some(Instant::now());
         result
+    }
+
+    fn invalidate(&mut self) {
+        self.active = None;
+        self.last_used = None;
+        self.staged_diff_key = None;
     }
 
     fn expire(&mut self, now: Instant) -> bool {
@@ -1411,9 +1427,13 @@ fn event_loop(
             dirty = true;
             urgent = true;
         }
-        if status_config_changed {
+        if status_config_changed || monitor_changes.layout {
             fill_repository.retain = false;
             fill_repository.retained = None;
+            invalidate_worktree_changes(&mut worktree_changes);
+            if let Some(pool) = line_diff_pool.as_mut() {
+                pool.invalidate();
+            }
         }
         if monitor_changes.references || monitor_changes.configuration || monitor_changes.layout {
             app.clear_enrichments();
@@ -2091,7 +2111,9 @@ fn event_loop(
                 Err(_err) if !repository_is_bare && worktree_repository_is_gone(&repository_path, &common_dir) => {
                     continue;
                 }
-                Err(err) => return Err(err).or_raise(|| message("could not inspect changed references")),
+                Err(err) => {
+                    return Err(err).or_raise(|| message("could not inspect changed references"));
+                }
             };
             match open_repository(&repository_path, repository_is_bare, false) {
                 Ok(configured_repository) => {
@@ -5022,7 +5044,9 @@ fn remove_worktree(
         .or_raise(|| message!("could not remove worktree {label}"))?;
     let (branch, expected) = match branch_cleanup {
         Ok(Some(cleanup)) => cleanup,
-        Ok(None) => return Ok(BackgroundCompletion::Success(format!("removed worktree {label}"))),
+        Ok(None) => {
+            return Ok(BackgroundCompletion::Success(format!("removed worktree {label}")));
+        }
         Err(err) => {
             return Ok(BackgroundCompletion::Attention(format!(
                 "removed worktree {label}; branch cleanup was skipped: {err:#}"
@@ -5378,7 +5402,9 @@ fn start_history_refresh(
                         let mut reference = match reference {
                             Ok(reference) => reference,
                             Err(err) if history::is_missing_ref(&err) => continue,
-                            Err(err) => return Err(message!("could not read remote-tracking reference: {err}").raise()),
+                            Err(err) => {
+                                return Err(message!("could not read remote-tracking reference: {err}").raise());
+                            }
                         };
                         let Ok(commit_id) = reference.peel_to_id() else {
                             continue;
@@ -6328,7 +6354,7 @@ fn draw(
                 refresh_worktree_changes(
                     repository,
                     monitor,
-                    worktree_changes.as_ref().map(|(_, changes)| changes),
+                    worktree_changes.as_ref().filter(|_| !full).map(|(_, changes)| changes),
                     line_diff_pool,
                 )
             } else {
@@ -8277,6 +8303,65 @@ fn monitored_worktree_changes(
 ) -> Result<Changes> {
     use gix::status::monitor::Change;
 
+    // Indexed and external attributes can change without a local attribute event.
+    // Keep their contents and the resolved configuration alongside reusable counts.
+    let index = repository.index_or_load_from_head_or_empty()?;
+    let ignore_case = repository.filesystem_options()?.ignore_case;
+    let case = if ignore_case {
+        gix::glob::pattern::Case::Fold
+    } else {
+        gix::glob::pattern::Case::Sensitive
+    };
+    let mut global_attributes = Vec::new();
+    for path in repository
+        .attribute_global_paths()?
+        .into_iter()
+        .chain([repository.common_dir().join("info/attributes")])
+    {
+        let contents = match std::fs::read(&path) {
+            Ok(contents) => Some(contents),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::IsADirectory | io::ErrorKind::NotADirectory
+                ) || cfg!(windows) && err.kind() == io::ErrorKind::PermissionDenied =>
+            {
+                None
+            }
+            Err(err) => {
+                return Err(err).or_raise(|| message!("could not read attributes at {}", path.display()));
+            }
+        };
+        global_attributes.push((path, contents));
+    }
+    let staged_diff_key = StagedDiffKey {
+        configuration: repository.config_snapshot().plumbing().to_bstring(),
+        configuration_metadata: repository
+            .config_snapshot()
+            .plumbing()
+            .sections()
+            .map(|section| section.meta().clone())
+            .collect(),
+        global_attributes,
+        indexed_attributes: gix_worktree::stack::State::AttributesStack(Default::default()).id_mappings_from_index(
+            &index,
+            index.path_backing(),
+            case,
+        ),
+    };
+    let configuration_changed = pool.staged_diff_key.as_ref().is_none_or(|previous| {
+        previous.configuration != staged_diff_key.configuration
+            || previous.configuration_metadata != staged_diff_key.configuration_metadata
+    });
+    if configuration_changed {
+        pool.active = None;
+        pool.last_used = None;
+    }
+    let external_attributes_changed = pool
+        .staged_diff_key
+        .as_ref()
+        .is_none_or(|previous| previous.global_attributes != staged_diff_key.global_attributes);
+    let staged_diff_key_changed = pool.staged_diff_key.as_ref() != Some(&staged_diff_key);
     let rank = |group| match group {
         ChangeGroup::Staged => 0,
         ChangeGroup::Unstaged => 1,
@@ -8350,12 +8435,12 @@ fn monitored_worktree_changes(
             .or_default()
             .push((path, diff));
     }
-    let ignore_case = repository.filesystem_options()?.ignore_case;
     let mut positions = Vec::new();
     let mut diffs = Vec::new();
     for (position, (path, diff)) in out.paths.iter_mut().zip(&out.diffs).enumerate() {
         let covered = match path.group {
-            ChangeGroup::Staged => update.staged,
+            ChangeGroup::Staged => staged_diff_key_changed,
+            ChangeGroup::Unstaged if configuration_changed || external_attributes_changed => true,
             ChangeGroup::Unstaged => match &update.unstaged {
                 None => false,
                 Some(gix::notify::Scope::All) => true,
@@ -8388,6 +8473,7 @@ fn monitored_worktree_changes(
         out.lines_added += u64::from(added);
         out.lines_removed += u64::from(removed);
     }
+    pool.staged_diff_key = Some(staged_diff_key);
     Ok(out)
 }
 
@@ -8716,7 +8802,9 @@ fn app_action(key: KeyEvent, app: &App) -> Option<Action> {
             if app.changes_focus.is_none() {
                 match key.code {
                     KeyCode::Up | KeyCode::Char('k' | 'K') => return Some(Action::TopologicalUp),
-                    KeyCode::Down | KeyCode::Char('j' | 'J') => return Some(Action::TopologicalDown),
+                    KeyCode::Down | KeyCode::Char('j' | 'J') => {
+                        return Some(Action::TopologicalDown);
+                    }
                     _ => {}
                 }
             } else {
@@ -8930,7 +9018,9 @@ fn action_with_shortcut_groups(
         _ => None,
     }
     .or_else(|| {
-        let KeyCode::Char(letter) = code else { return None };
+        let KeyCode::Char(letter) = code else {
+            return None;
+        };
         use command_menu::CommandGroup::{Actions, Enrich, Information, View};
         [
             (actions_expanded, Actions),
@@ -12223,6 +12313,238 @@ added
             load_worktree_changes(&repository, &mut pool)?,
             "a staged-only replacement follows the new HEAD tree"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn monitored_staged_line_counts_reuse_unchanged_blobs() -> gix_testtools::Result {
+        let fixture = gix_testtools::scripted_fixture_writable("history.sh")?;
+        let root = fixture.path();
+        test_repository::disable_autocrlf(root)?;
+        std::fs::remove_file(root.join(".mailmap"))?;
+        for path in ["main", "root"] {
+            std::fs::write(root.join(path), "one\ntwo\n")?;
+        }
+        let status = gix_testtools::git_command(root)
+            .args(["add", "main", "root"])
+            .status()?;
+        assert!(status.success(), "both tracked files are staged");
+        let repository = test_repository::open(root)?;
+        let mut pool = LineDiffPool::new(root, false, 2);
+        let mut monitor = gix::status::Monitor::new(&repository, Default::default())?;
+        let mut cached = refresh_worktree_changes(&repository, &mut monitor, None, &mut pool)?;
+        let last_batch = pool.last_used;
+        update_monitored_changes(
+            &repository,
+            &mut monitor,
+            &mut cached,
+            &gix::notify::Changes {
+                index: true,
+                ..Default::default()
+            },
+            &mut pool,
+        )?;
+        assert_eq!(
+            pool.last_used, last_batch,
+            "unchanged staged blobs do not start another diff batch"
+        );
+        assert_eq!(
+            (cached.lines_added, cached.lines_removed),
+            (4, 2),
+            "both staged rows retain their original line counts"
+        );
+
+        std::fs::write(root.join("main"), "one\ntwo\nthree\n")?;
+        let status = gix_testtools::git_command(root).args(["add", "main"]).status()?;
+        assert!(status.success(), "another hunk changes the staged blob");
+        update_monitored_changes(
+            &repository,
+            &mut monitor,
+            &mut cached,
+            &gix::notify::Changes {
+                index: true,
+                ..Default::default()
+            },
+            &mut pool,
+        )?;
+        assert_eq!(
+            (cached.lines_added, cached.lines_removed),
+            (5, 2),
+            "the new staged blob gets fresh counts"
+        );
+        assert_eq!(
+            cached,
+            load_worktree_changes(&repository, &mut pool)?,
+            "cached results equal a full diff"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn monitored_line_counts_follow_configuration_and_indexed_attributes() -> gix_testtools::Result {
+        let fixture = gix_testtools::scripted_fixture_writable("history.sh")?;
+        let root = fixture.path();
+        test_repository::disable_autocrlf(root)?;
+        std::fs::remove_file(root.join(".mailmap"))?;
+        std::fs::write(root.join("main"), "one\ntwo\n")?;
+        std::fs::write(root.join(".gitattributes"), "main diff=counting\n")?;
+        let status = gix_testtools::git_command(root)
+            .args(["add", "main", ".gitattributes"])
+            .status()?;
+        assert!(status.success(), "the staged file uses a configurable diff driver");
+        let repository = test_repository::open(root)?;
+        let mut pool = LineDiffPool::new(root, false, 2);
+        let mut monitor = gix::status::Monitor::new(&repository, Default::default())?;
+        let mut cached = refresh_worktree_changes(&repository, &mut monitor, None, &mut pool)?;
+        let lines = |changes: &Changes, group| {
+            changes
+                .paths
+                .iter()
+                .find(|path| path.group == group && path.path == "main")
+                .expect("the requested main row is present")
+                .lines
+        };
+        assert_eq!(
+            lines(&cached, ChangeGroup::Staged),
+            Some((2, 1)),
+            "the initial staged file is counted as text"
+        );
+        drop(repository);
+        for binary in ["true", "false"] {
+            let status = gix_testtools::git_command(root)
+                .args(["config", "diff.counting.binary", binary])
+                .status()?;
+            assert!(status.success(), "the diff driver changes without changing the blobs");
+            let repository = test_repository::open(root)?;
+            update_monitored_changes(
+                &repository,
+                &mut monitor,
+                &mut cached,
+                &gix::notify::Changes {
+                    index: true,
+                    ..Default::default()
+                },
+                &mut pool,
+            )?;
+            assert_eq!(
+                lines(&cached, ChangeGroup::Staged),
+                (binary == "false").then_some((2, 1)),
+                "an index-only event reopens changed configuration for unchanged staged blobs"
+            );
+        }
+
+        std::fs::write(root.join(".gitattributes"), "main -diff\n")?;
+        let status = gix_testtools::git_command(root)
+            .args(["add", ".gitattributes"])
+            .status()?;
+        assert!(
+            status.success(),
+            "indexed attributes change while the main blob stays the same"
+        );
+        let repository = test_repository::open(root)?;
+        update_monitored_changes(
+            &repository,
+            &mut monitor,
+            &mut cached,
+            &gix::notify::Changes {
+                index: true,
+                ..Default::default()
+            },
+            &mut pool,
+        )?;
+        assert_eq!(
+            lines(&cached, ChangeGroup::Staged),
+            None,
+            "an index-only event invalidates attribute-dependent counts"
+        );
+
+        std::fs::write(root.join(".gitattributes"), "main diff\n")?;
+        std::fs::write(root.join("main"), "one\ntwo\nthree\n")?;
+        pool.invalidate();
+        update_monitored_changes(
+            &repository,
+            &mut monitor,
+            &mut cached,
+            &gix::notify::Changes {
+                attributes: true,
+                ..Default::default()
+            },
+            &mut pool,
+        )?;
+        assert_eq!(
+            lines(&cached, ChangeGroup::Staged),
+            None,
+            "staged diffs still use indexed attributes"
+        );
+        assert_eq!(
+            lines(&cached, ChangeGroup::Unstaged),
+            Some((1, 0)),
+            "worktree diffs use current worktree attributes"
+        );
+        assert_eq!(
+            cached,
+            load_worktree_changes(&repository, &mut pool)?,
+            "attribute invalidation preserves full-refresh parity"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn monitored_staged_line_counts_follow_external_attributes() -> gix_testtools::Result {
+        let fixture = gix_testtools::scripted_fixture_writable("history.sh")?;
+        let root = fixture.path();
+        test_repository::disable_autocrlf(root)?;
+        std::fs::remove_file(root.join(".mailmap"))?;
+        let external = gix_testtools::tempfile::tempdir()?;
+        let global_attributes = external.path().join("attributes");
+        let status = gix_testtools::git_command(root)
+            .args(["config", "core.attributesFile"])
+            .arg(&global_attributes)
+            .status()?;
+        assert!(
+            status.success(),
+            "the repository uses a missing external attribute file"
+        );
+        std::fs::write(root.join("main"), "one\ntwo\n")?;
+        let status = gix_testtools::git_command(root).args(["add", "main"]).status()?;
+        assert!(status.success(), "the changed text file is staged");
+        let repository = test_repository::open(root)?;
+        let mut pool = LineDiffPool::new(root, false, 2);
+        let mut monitor = gix::status::Monitor::new(&repository, Default::default())?;
+        let mut cached = refresh_worktree_changes(&repository, &mut monitor, None, &mut pool)?;
+        let lines = |changes: &Changes| {
+            changes
+                .paths
+                .iter()
+                .find(|path| path.group == ChangeGroup::Staged && path.path == "main")
+                .expect("the staged main row is present")
+                .lines
+        };
+        assert_eq!(lines(&cached), Some((2, 1)), "absent attributes leave the file as text");
+        for attributes in [global_attributes, repository.common_dir().join("info/attributes")] {
+            for contents in [Some("main -diff\n"), Some("main diff\n"), None] {
+                if let Some(contents) = contents {
+                    std::fs::write(&attributes, contents)?;
+                } else {
+                    std::fs::remove_file(&attributes)?;
+                }
+                update_monitored_changes(
+                    &repository,
+                    &mut monitor,
+                    &mut cached,
+                    &gix::notify::Changes {
+                        index: true,
+                        ..Default::default()
+                    },
+                    &mut pool,
+                )?;
+                assert_eq!(
+                    lines(&cached),
+                    (contents != Some("main -diff\n")).then_some((2, 1)),
+                    "an index-only event reads created, changed, and removed attribute files"
+                );
+            }
+        }
         Ok(())
     }
 
