@@ -99,6 +99,12 @@ impl Head {
     }
 }
 
+struct HeadTreeIndex {
+    tree_id: gix_hash::ObjectId,
+    protect: gix_validate::path::component::Options,
+    index: gix_index::State,
+}
+
 /// One selected checkout's owned status snapshot and project filesystem subscriptions.
 ///
 /// The repository used at construction remains the notification coordinator. Select another
@@ -108,6 +114,8 @@ impl Head {
 /// No repository, object database, or producer thread is retained between calls. Index entries
 /// needed for incremental comparisons are retained in an exact, prefix-compressed byte buffer,
 /// without index extensions, per-entry allocations, or open files.
+/// A detached index expanded from the captured HEAD tree is reused until the tree or path-protection
+/// settings change. Full, configuration, layout, and target invalidations release it.
 /// Call [`service()`](Self::service) from the event loop, then [`refresh()`](Self::refresh) when
 /// [`refresh_due()`](Self::refresh_due) is true. A failed or interrupted refresh preserves the previous
 /// snapshot and its pending invalidations. Initialized nested submodules are monitored recursively.
@@ -126,6 +134,7 @@ pub struct Monitor {
     index_stamp: Option<(Option<gix_hash::ObjectId>, i64, u32)>,
     index_dirty: bool,
     head: Option<Head>,
+    head_tree_index: Option<HeadTreeIndex>,
     head_dirty: bool,
     staged: bool,
     unstaged: Option<Scope>,
@@ -159,6 +168,7 @@ impl Monitor {
             index_stamp: None,
             index_dirty: true,
             head: None,
+            head_tree_index: None,
             head_dirty: true,
             staged: true,
             unstaged: Some(Scope::All),
@@ -443,6 +453,7 @@ impl Monitor {
 
     /// Mark the complete snapshot and submodule inventory for refresh.
     pub fn invalidate(&mut self) {
+        self.head_tree_index = None;
         self.retry = None;
         self.staged = true;
         self.index_dirty = true;
@@ -454,6 +465,9 @@ impl Monitor {
     /// Apply invalidations from application-owned Git operations or other event sources.
     /// Native Unicode aliases of configured submodule paths require a full worktree refresh.
     pub fn invalidate_changes(&mut self, changes: &Changes) {
+        if changes.configuration || changes.layout {
+            self.head_tree_index = None;
+        }
         self.head_dirty |= changes.references;
         self.index_dirty |= changes.index || changes.configuration || changes.layout;
         if changes.configuration || changes.layout {
@@ -773,6 +787,28 @@ impl Monitor {
         if submodules_dirty {
             self.reconcile_submodules(repo, interrupt)?;
         }
+        let mut next_tree_index = None;
+        let tree_index = if let Some(tree_id) = head_tree_id.filter(|_| repo.workdir().is_some()) {
+            let protect = repo.config.protect_options()?;
+            if self.head_tree_index.as_ref().is_none_or(|cached| {
+                cached.tree_id != tree_id
+                    || cached.protect.protect_windows != protect.protect_windows
+                    || cached.protect.protect_hfs != protect.protect_hfs
+                    || cached.protect.protect_ntfs != protect.protect_ntfs
+            }) {
+                next_tree_index = Some(HeadTreeIndex {
+                    tree_id,
+                    protect,
+                    index: repo.index_from_tree(&tree_id)?.into(),
+                });
+            }
+            next_tree_index
+                .as_ref()
+                .or(self.head_tree_index.as_ref())
+                .map(|cached| &cached.index)
+        } else {
+            None
+        };
         let collect = |patterns, staged, unstaged| {
             let mut status = repo
                 .status(gix_utils::progress::Discard)
@@ -790,7 +826,7 @@ impl Monitor {
                     options.thread_limit = self.options.thread_limit;
                     options.sorting = Some(gix_status::index_as_worktree_with_renames::Sorting::ByPathCaseSensitive);
                 })
-                .collect_internal(patterns, staged, unstaged, interrupt)
+                .collect_internal(patterns, staged, unstaged, interrupt, tree_index)
         };
         let mut replacement = Vec::new();
         if repo.workdir().is_some() {
@@ -845,6 +881,9 @@ impl Monitor {
         }
         self.index_stamp = Some(stamp);
         self.index_dirty = false;
+        if next_tree_index.is_some() {
+            self.head_tree_index = next_tree_index;
+        }
         if let Some(head) = head {
             self.head = Some(head);
         }
