@@ -43,6 +43,10 @@ pub struct Options {
     pub tree_index_track_renames: crate::status::tree_index::TrackRenames,
     /// Optional worktree rename/copy detection. Incremental refreshes become full scans when enabled.
     pub worktree_rewrites: Option<gix_diff::Rewrites>,
+    /// Limit the number of threads used for tracked worktree status.
+    ///
+    /// `None` or `Some(0)` uses all available parallelism.
+    pub thread_limit: Option<usize>,
 }
 
 /// Changes since the previous successful snapshot and the coverage recomputed this round.
@@ -783,6 +787,7 @@ impl Monitor {
                 .index_worktree_submodules(self.options.submodules)
                 .index_worktree_rewrites(self.options.worktree_rewrites)
                 .index_worktree_options_mut(|options| {
+                    options.thread_limit = self.options.thread_limit;
                     options.sorting = Some(gix_status::index_as_worktree_with_renames::Sorting::ByPathCaseSensitive);
                 })
                 .collect_internal(patterns, staged, unstaged, interrupt)
