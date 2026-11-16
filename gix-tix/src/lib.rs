@@ -13658,6 +13658,7 @@ added
                 metadata_debounce: Duration::from_millis(42),
                 max_latency: Duration::from_millis(84),
                 retry_interval: Duration::from_secs(2),
+                ..Default::default()
             };
             let initial = test_repository::open(&fixture)?.monitor(options)?;
             let options = initial.options().clone();

@@ -359,6 +359,7 @@ pub mod watch {
                     metadata: !self.no_metadata,
                     all_worktrees: self.all_worktrees,
                     worktree_filter: self.worktree_filter,
+                    checkout_filter: None,
                     additional_paths: self
                         .additional_paths
                         .into_iter()

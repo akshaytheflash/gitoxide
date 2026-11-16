@@ -6,6 +6,11 @@ use gix::notify::{
 };
 use gix_error::TestResult;
 
+#[cfg(feature = "async-notify")]
+mod processing;
+mod recovery;
+mod subscriptions;
+
 #[test]
 fn overflowing_scheduling_durations_are_rejected() -> TestResult {
     let repo = crate::basic_repo()?;
@@ -230,6 +235,7 @@ fn assert_options(actual: &Options, expected: &Options) {
             actual.metadata,
             actual.all_worktrees,
             &actual.worktree_filter,
+            &actual.checkout_filter,
             &actual.additional_paths,
             actual.worktree_coverage,
             actual.metadata_debounce,
@@ -240,6 +246,7 @@ fn assert_options(actual: &Options, expected: &Options) {
             expected.metadata,
             expected.all_worktrees,
             &expected.worktree_filter,
+            &expected.checkout_filter,
             &expected.additional_paths,
             expected.worktree_coverage,
             expected.metadata_debounce,
@@ -2232,6 +2239,63 @@ mod all_worktrees {
                     }
                     shared && main_private == (true, true, true)
                 });
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn metadata_only_mode_keeps_private_operations_and_membership_live() -> TestResult {
+            for coverage in [None, Some(WorktreeCoverage::IgnoreAware)] {
+                let Some(fixture) = writable_fixture("files")? else {
+                    return Ok(());
+                };
+                let repo = gix::open_opts(fixture.path().join("linked-a"), crate::restricted())?;
+                let mut monitor = repo.monitor(Options {
+                    worktree_coverage: coverage,
+                    checkout_filter: Some(vec![]),
+                    ..options(WorktreeCoverage::IgnoreAware)
+                })?;
+                wait_for_quiet(&mut monitor, &repo, "metadata-only startup", |_| true);
+                for name in ["main", "linked-b"] {
+                    let other = gix::open_opts(fixture.path().join(name), crate::restricted())?;
+                    let git_dir = other.git_dir().canonicalize()?;
+                    std::fs::write(
+                        git_dir.join("MERGE_MSG"),
+                        "metadata-only operation state
+",
+                    )?;
+                    wait_for_quiet(
+                        &mut monitor,
+                        &repo,
+                        "private metadata without checkout coverage",
+                        |out| {
+                            assert!(
+                                !out.changes.operations,
+                                "other operation state is not assigned to the coordinator"
+                            );
+                            out.other_worktrees
+                                .iter()
+                                .any(|change| change.git_dir == git_dir && changed(change).operations)
+                        },
+                    );
+                }
+                let output = gix_testtools::git_command(repo.workdir().expect("linked checkout"))
+                    .args(["worktree", "add", "--detach", "../metadata-new", "HEAD"])
+                    .output()?;
+                assert!(
+                    output.status.success(),
+                    "Git adds a checkout while status coverage is suspended: {output:?}"
+                );
+                wait_for(&mut monitor, &repo, "new metadata-only checkout membership", |out| {
+                    out.other_worktrees.iter().any(|change| {
+                        change.worktree.ends_with("metadata-new") && matches!(change.kind, WorktreeChange::Added)
+                    })
+                });
+                assert_eq!(
+                    monitor.other_worktrees().count(),
+                    3,
+                    "metadata-only membership discovers new checkouts"
+                );
             }
             Ok(())
         }
