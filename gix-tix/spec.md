@@ -2345,6 +2345,9 @@ views.
 - Index changes refresh only affected worktree paths when possible, while staged
   status is recomputed with configured rename detection. Ignore, attribute, and
   other status dependencies widen coverage when needed for a correct snapshot.
+- Monitored status uses at most three tracked-file workers on macOS, matching
+  `gix status` to avoid excessive CPU spent in concurrent metadata checks.
+  Other platforms retain their available parallelism.
 - Status deltas replace only changed display rows. Snapshot coverage also invalidates
   line counts when the status classification stays unchanged. Unaffected rows retain
   their cached counts, including when only index metadata changes. A full refresh

@@ -1168,6 +1168,8 @@ fn event_loop(
                         .then_some(Default::default()),
                     ..Default::default()
                 },
+                // Match `gix status`: concurrent metadata checks scale poorly on macOS.
+                thread_limit: cfg!(target_os = "macos").then_some(3),
                 ..Default::default()
             },
         )?;
@@ -13727,6 +13729,7 @@ added
                 &test_repository::open(&fixture)?,
                 gix::status::monitor::Options {
                     repository: options,
+                    thread_limit: Some(2),
                     ..Default::default()
                 },
             )?;
@@ -13756,6 +13759,15 @@ added
                     .expect("successful replacement restores monitoring")
                     .repository_monitor()
                     .options();
+                assert_eq!(
+                    monitor
+                        .as_ref()
+                        .expect("monitoring was restored")
+                        .options()
+                        .thread_limit,
+                    Some(2),
+                    "coverage transitions preserve the tracked-worker limit"
+                );
                 assert_eq!(
                     actual.worktree_coverage,
                     enabled.then_some(gix::notify::WorktreeCoverage::IgnoreAware),
