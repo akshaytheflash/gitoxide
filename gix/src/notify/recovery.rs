@@ -12,7 +12,7 @@ pub enum CoverageStatus {
     Updating,
     /// Every enabled subscription is installed and verified.
     Healthy,
-    /// Coverage needs repair after a failure or an explicit rescan.
+    /// Coverage needs repair after a failure, loss, or an explicit rescan.
     Recovering {
         /// The earliest pending repair deadline, excluding unrelated inventory verification.
         ///
@@ -47,7 +47,7 @@ impl RepositoryMonitor {
         if self.external_ignores.retry.is_some() {
             return true;
         }
-        self.registration_recovery_pending()
+        self.deferred_loss.is_some() || self.registration_recovery_pending()
     }
 
     fn registration_recovery_pending(&self) -> bool {
@@ -59,6 +59,7 @@ impl RepositoryMonitor {
     fn recovery_retry_at(&self) -> Option<Instant> {
         [
             self.maintenance.filter(|_| self.registration_recovery_pending()),
+            self.deferred_loss.as_ref().map(|loss| loss.deadline),
             #[cfg(target_os = "macos")]
             self.external_ignores.retry,
         ]
