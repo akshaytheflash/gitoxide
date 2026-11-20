@@ -1,36 +1,45 @@
 use std::path::Path;
 
-use gix_error::{ResultExt, message};
-
 pub use gix_discover::*;
+use gix_error::{ResultExt, message};
+use gix_sec::{Trust, trust::DefaultForLevel};
 
-use crate::{Result, ThreadSafeRepository, bstr::BString};
+use crate::{Repository, Result, ThreadSafeRepository, bstr::BString};
 
 impl ThreadSafeRepository {
     /// Try to open a git repository in `directory` and search upwards through its parents until one is found,
     /// using default trust options which matters in case the found repository isn't owned by the current user.
     pub fn discover(directory: impl AsRef<Path>) -> Result<Self> {
-        Self::discover_opts(directory, Default::default(), Default::default())
+        Self::discover_opts(directory, Default::default(), crate::open::Options::default_for_level)
     }
 
-    /// Try to open a git repository in `directory` and search upwards through its parents until one is found,
-    /// while applying `options`. Then use the `trust_map` to determine which of our own repository options to use
-    /// for instantiations.
+    /// Search upwards from `directory` using `options`. When a repository is found, call `open_options_by_trust`
+    /// with its initial trust level to obtain the options for opening it.
     ///
     /// Discovery supplies the initial trust level through [`upwards::Options::trust`], replacing any
     /// [initial](crate::open::Options::with_trust()) or [enforced](crate::open::Options::with_enforced_trust())
-    /// trust level in `trust_map`.
+    /// trust level in the returned options.
     /// [`upwards::TrustPolicy::Assume`] supplies that initial level directly. Opening still applies
     /// `safe.directory` and checks ownership of the final worktree.
     pub fn discover_opts(
         directory: impl AsRef<Path>,
         options: upwards::Options<'_>,
-        trust_map: gix_sec::trust::Mapping<crate::open::Options>,
+        open_options_by_trust: impl FnOnce(Trust) -> crate::open::Options,
+    ) -> Result<Self> {
+        Self::discover_with_options(directory.as_ref(), options, |trust| {
+            open_options_by_trust(trust).with_trust(trust)
+        })
+    }
+
+    fn discover_with_options(
+        directory: &Path,
+        options: upwards::Options<'_>,
+        open_options: impl FnOnce(Trust) -> crate::open::Options,
     ) -> Result<Self> {
         let _span = gix_trace::coarse!("ThreadSafeRepository::discover()");
-        let (path, trust) = upwards_opts(directory.as_ref(), options)?;
+        let (path, trust) = upwards_opts(directory, options)?;
         let (git_dir, worktree_dir) = path.into_repository_and_work_tree_directories();
-        let mut options = trust_map.into_value_by_level(trust).with_trust(trust);
+        let mut options = open_options(trust);
         // Note that we will adjust the `current_dir` later so it matches the value of `core.precomposeUnicode`.
         options.current_dir =
             Some(gix_fs::current_dir(false).or_raise(|| message("Could not obtain the current working directory"))?);
@@ -43,7 +52,11 @@ impl ThreadSafeRepository {
     ///
     /// For more, see [`ThreadSafeRepository::discover_with_environment_overrides_opts()`].
     pub fn discover_with_environment_overrides(directory: impl AsRef<Path>) -> Result<Self> {
-        Self::discover_with_environment_overrides_opts(directory, Default::default(), Default::default())
+        Self::discover_with_environment_overrides_opts(
+            directory,
+            Default::default(),
+            crate::open::Options::default_for_level,
+        )
     }
 
     /// Try to open a git repository directly from the environment, which reads `GIT_DIR`
@@ -65,8 +78,9 @@ impl ThreadSafeRepository {
     /// to them. Honoring these variables preserves the repository and worktree context established by
     /// Git, including temporary overrides, instead of relying only on discovery from `directory`.
     ///
-    /// Finally, use the `trust_map` to determine which of our own repository options to use
-    /// based on the trust level of the effective repository directory.
+    /// Once a repository is found, call `open_options_by_trust` with its initial trust level, derived from
+    /// ownership if `GIT_DIR` is set or supplied by upward discovery otherwise. As in [`Self::discover_opts()`],
+    /// this level replaces any trust setting in the returned options.
     ///
     /// ### Note
     ///
@@ -75,8 +89,19 @@ impl ThreadSafeRepository {
     /// compatibility with Git.
     pub fn discover_with_environment_overrides_opts(
         directory: impl AsRef<Path>,
+        options: upwards::Options<'_>,
+        open_options_by_trust: impl FnOnce(Trust) -> crate::open::Options,
+    ) -> Result<Self> {
+        Self::discover_with_environment_and_options(directory.as_ref(), options, None, |trust| {
+            open_options_by_trust(trust).with_trust(trust)
+        })
+    }
+
+    fn discover_with_environment_and_options(
+        directory: &Path,
         mut options: upwards::Options<'_>,
-        trust_map: gix_sec::trust::Mapping<crate::open::Options>,
+        assumed_trust: Option<Trust>,
+        open_options: impl FnOnce(Trust) -> crate::open::Options,
     ) -> Result<Self> {
         fn apply_additional_environment(mut opts: upwards::Options<'_>) -> upwards::Options<'_> {
             use crate::bstr::ByteVec;
@@ -91,10 +116,37 @@ impl ThreadSafeRepository {
         }
 
         if std::env::var_os("GIT_DIR").is_some() {
-            return Self::open_with_environment_overrides(directory.as_ref(), trust_map);
+            return Self::open_with_environment_and_options(directory, assumed_trust, open_options);
         }
 
         options = apply_additional_environment(options.apply_environment());
-        Self::discover_opts(directory, options, trust_map)
+        Self::discover_with_options(directory, options, open_options)
     }
+}
+
+pub(crate) fn discover_with_open_options(
+    directory: &Path,
+    options: upwards::Options<'_>,
+    open_options: crate::open::Options,
+    use_environment: bool,
+) -> Result<Repository> {
+    let open_trust = open_options.git_dir_trust;
+    let options_for_trust = |trust| {
+        if open_trust.is_some() {
+            open_options
+        } else {
+            open_options.with_trust(trust)
+        }
+    };
+    if use_environment {
+        ThreadSafeRepository::discover_with_environment_and_options(
+            directory,
+            options,
+            open_trust.map(crate::open::RepositoryTrust::level),
+            options_for_trust,
+        )
+    } else {
+        ThreadSafeRepository::discover_with_options(directory, options, options_for_trust)
+    }
+    .map(Into::into)
 }

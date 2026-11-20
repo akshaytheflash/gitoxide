@@ -142,11 +142,12 @@ impl Options {
         self
     }
 
-    /// Set the initial trust level for a [direct open][Self::open], or pass `None` to determine it from ownership.
+    /// Set the initial trust level when [opening a repository][Self::open], including after [discovery][crate::discover_opts()].
+    /// Pass `None` to use the trust determined from ownership or supplied by discovery.
     ///
-    /// Supplying a level skips the ownership checks of the repository path before resolving any gitfile,
-    /// the resolved Git directory, its common directory (if separate), and the initially identified worktree
-    /// (if it exists).
+    /// When opening without an upward search, supplying a level skips the ownership checks of the repository path
+    /// before resolving any gitfile, the resolved Git directory, its common directory (if separate), and the
+    /// initially identified worktree (if it exists). It does not change the [upward search's trust policy][crate::discover_opts()].
     ///
     /// Opening still considers `safe.directory` and the ownership of the final worktree. The final worktree
     /// can differ because `core.worktree` is read after the initial path is identified and can point to a
@@ -161,12 +162,14 @@ impl Options {
         self
     }
 
-    /// Enforce `trust` for a [direct open][Self::open], or pass `None` to determine trust from ownership again.
+    /// Enforce `trust` when [opening a repository][Self::open], including after [discovery][crate::discover_opts()].
+    /// Pass `None` to use the trust determined from ownership or supplied by discovery.
     ///
-    /// An enforced level skips repository and worktree ownership checks and `safe.directory` approval.
-    /// [Reloading][crate::Repository::reload()] retains it. Discovery, submodules and other worktrees
-    /// determine their own trust. [`bail_if_untrusted(true)`][Self::bail_if_untrusted] rejects an enforced
-    /// [`Reduced`][gix_sec::Trust::Reduced] level.
+    /// An enforced level skips opening's repository and worktree ownership checks and `safe.directory` approval.
+    /// It does not change the [upward search's trust policy][crate::discover_opts()].
+    /// [Reloading][crate::Repository::reload()] retains it. [`ThreadSafeRepository::discover_opts()`][crate::ThreadSafeRepository::discover_opts()]
+    /// replaces trust in options returned by its callback. Submodules and other worktrees determine their own trust.
+    /// [`bail_if_untrusted(true)`][Self::bail_if_untrusted] rejects an enforced [`Reduced`][gix_sec::Trust::Reduced] level.
     ///
     /// See [`with_trust()`][Self::with_trust()] to set the initial level while keeping the later trust checks.
     ///

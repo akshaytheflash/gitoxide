@@ -14,6 +14,7 @@ use gix::{
     Result,
     bstr::{BString, io::BufReadExt},
     error::{OptionExt, ResultExt, bail, message},
+    sec::trust::DefaultForLevel,
 };
 
 use crate::{
@@ -72,7 +73,6 @@ pub fn main() -> Result<()> {
     let repository = {
         let config = config.clone();
         move |mut mode: Mode| -> Result<gix::Repository> {
-            let mut mapping: gix::sec::trust::Mapping<gix::open::Options> = Default::default();
             if !config.is_empty() {
                 mode = match mode {
                     Mode::Lenient => Mode::Strict,
@@ -81,27 +81,23 @@ pub fn main() -> Result<()> {
                 };
             }
             let strict_toggle = matches!(mode, Mode::Strict | Mode::StrictWithGitInstallConfig) || args.strict;
-            mapping.full = mapping.full.strict_config(strict_toggle);
-            mapping.reduced = mapping.reduced.strict_config(strict_toggle);
             let git_installation = matches!(
                 mode,
                 Mode::StrictWithGitInstallConfig | Mode::LenientWithGitInstallConfig
             );
-            let to_match_settings = |mut opts: gix::open::Options| {
-                opts.permissions.config.git_binary = git_installation;
-                opts.permissions.attributes.git_binary = git_installation;
-                if config.is_empty() {
-                    opts
-                } else {
-                    opts.cli_overrides(config.clone())
-                }
-            };
-            mapping.full.modify(to_match_settings);
-            mapping.reduced.modify(to_match_settings);
             let mut repo = gix::ThreadSafeRepository::discover_with_environment_overrides_opts(
                 &repository,
                 Default::default(),
-                mapping,
+                |trust| {
+                    let mut options = gix::open::Options::default_for_level(trust).strict_config(strict_toggle);
+                    options.permissions.config.git_binary = git_installation;
+                    options.permissions.attributes.git_binary = git_installation;
+                    if config.is_empty() {
+                        options
+                    } else {
+                        options.cli_overrides(config.clone())
+                    }
+                },
             )
             .map(gix::Repository::from)?;
             if !config.is_empty() {
